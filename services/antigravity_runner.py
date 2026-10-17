@@ -114,32 +114,26 @@ def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> s
 def resolve_cli_command(prompt: str) -> list[str]:
     """Resolve the command arguments for running Antigravity CLI.
 
-    Prefers `agy` (or user-specified binary) with non-interactive print mode and auto-approval.
+    Prefers `agy` or `antigravity` with non-interactive print mode (-p) and auto-approval.
     """
-    agy_path = shutil.which("agy") or "/opt/homebrew/bin/agy"
-    antigravity_path = shutil.which(ANTIGRAVITY_BIN)
+    cli_bin = shutil.which(ANTIGRAVITY_BIN) or shutil.which("agy") or "/opt/homebrew/bin/agy"
 
-    # If antigravity binary exists and is not agy, use standard flags
-    if antigravity_path and Path(antigravity_path).name == "antigravity":
-        return [antigravity_path, "run", "-y", "--model", ANTIGRAVITY_MODEL, prompt]
+    if not Path(cli_bin).exists() and not shutil.which(str(cli_bin)):
+        raise FileNotFoundError(
+            f"Neither '{ANTIGRAVITY_BIN}' nor 'agy' executable was found on PATH. "
+            "Please install the Antigravity CLI."
+        )
 
-    # Use native agy with auto-approval and print mode
-    if Path(agy_path).exists():
-        return [
-            agy_path,
-            "-p",
-            prompt,
-            "--model",
-            ANTIGRAVITY_MODEL,
-            "--print-timeout",
-            "35m",
-            "--dangerously-skip-permissions",
-        ]
-
-    raise FileNotFoundError(
-        f"Neither '{ANTIGRAVITY_BIN}' nor 'agy' executable was found on PATH. "
-        "Please install the Antigravity CLI."
-    )
+    return [
+        str(cli_bin),
+        "-p",
+        prompt,
+        "--model",
+        ANTIGRAVITY_MODEL,
+        "--print-timeout",
+        "35m",
+        "--dangerously-skip-permissions",
+    ]
 
 
 async def run_antigravity_podcast_pipeline(

@@ -32,7 +32,7 @@
        └─► 触发指令 `/make [可选标题]`
               │
               ▼ (组装非交互式结构化 Prompt)
-       [Antigravity CLI 子进程] (Headless 模式: agy -p / antigravity run -y)
+       [Antigravity CLI 子进程] (Headless 模式: agy -p / antigravity -p)
               │
               ▼ (调度 Model Context Protocol 服务)
        [gemini-notebook-mcp / notebooklm-mcp 服务]
@@ -100,7 +100,7 @@
 ### 4.3 Antigravity CLI 驱动模块（Subprocess Invocation）
 
 - **执行指令与参数规范**：
-  - 优先调用 `agy -p "<prompt>" --model gemini-3.8-flash-medium --print-timeout 35m --dangerously-skip-permissions`（或 `antigravity run -y`）。
+  - 统一调用 `agy` 或 `antigravity`：`-p "<prompt>" --model gemini-3.8-flash-medium --print-timeout 35m --dangerously-skip-permissions`。
   - 必须开启非交互与免确认权限，确保无头环境下平稳调度。
 - **运行目录（CWD）**：
   - 统一指向项目根目录下的 `./workspace`。

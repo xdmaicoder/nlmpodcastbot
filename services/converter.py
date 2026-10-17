@@ -96,11 +96,9 @@ async def _extract_via_antigravity_cli(image_path: Path) -> str:
     Returns:
         Extracted Markdown text.
     """
-    agy_path = shutil.which("agy") or "/opt/homebrew/bin/agy"
-    antigravity_path = shutil.which(ANTIGRAVITY_BIN)
-    cli_bin = antigravity_path if (antigravity_path and Path(antigravity_path).name == "antigravity") else agy_path
+    cli_bin = shutil.which(ANTIGRAVITY_BIN) or shutil.which("agy") or "/opt/homebrew/bin/agy"
 
-    if not Path(cli_bin).exists() and not shutil.which(cli_bin):
+    if not Path(cli_bin).exists() and not shutil.which(str(cli_bin)):
         raise FileNotFoundError(
             f"Neither Antigravity CLI executable '{cli_bin}' nor 'agy' found on PATH."
         )
@@ -110,17 +108,14 @@ async def _extract_via_antigravity_cli(image_path: Path) -> str:
         f"{VISION_PROMPT}"
     )
 
-    if Path(cli_bin).name == "antigravity":
-        cmd = [cli_bin, "run", "-y", "--model", ANTIGRAVITY_MODEL, prompt]
-    else:
-        cmd = [
-            cli_bin,
-            "-p",
-            prompt,
-            "--model",
-            ANTIGRAVITY_MODEL,
-            "--dangerously-skip-permissions",
-        ]
+    cmd = [
+        str(cli_bin),
+        "-p",
+        prompt,
+        "--model",
+        ANTIGRAVITY_MODEL,
+        "--dangerously-skip-permissions",
+    ]
 
     logger.info("Calling Antigravity CLI for multimodal image extraction: %s", image_path.name)
     env = os.environ.copy()
