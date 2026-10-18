@@ -34,6 +34,9 @@ workspace/outputs/
 *.mp3
 *.wav
 *.log
+logs/
+.bot.pid
+
 
 # IDEs and OS
 .DS_Store

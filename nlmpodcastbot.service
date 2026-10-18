@@ -1,0 +1,45 @@
+# ==============================================================================
+# nlmpodcastbot.service - Systemd 生产环境守护进程服务文件模板
+# ==============================================================================
+# 使用指南 (适用于 Ubuntu / Debian / CentOS / Rocky Linux 等生产服务器):
+# 1. 将本文件复制到系统服务目录并根据实际用户与路径调整：
+#    sudo cp nlmpodcastbot.service /etc/systemd/system/
+#    sudo vim /etc/systemd/system/nlmpodcastbot.service
+# 2. 重新加载 systemd 并启用开机自启：
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable nlmpodcastbot
+# 3. 启动并查看状态：
+#    sudo systemctl start nlmpodcastbot
+#    sudo systemctl status nlmpodcastbot
+# ==============================================================================
+
+[Unit]
+Description=Telegram NotebookLM Dual Podcast & Infographic Bot
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mac
+Group=staff
+WorkingDirectory=/Users/mac/project/nlmpodcastbot
+
+# 环境变量设置与虚拟环境激活
+EnvironmentFile=/Users/mac/project/nlmpodcastbot/.env
+ExecStart=/Users/mac/project/nlmpodcastbot/.venv/bin/python3 -u /Users/mac/project/nlmpodcastbot/bot.py
+
+# 崩溃自动重启策略
+Restart=always
+RestartSec=5s
+
+# 进程资源与限制
+LimitNOFILE=65535
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+
+# 标准日志流重定向至 systemd journal (亦可通过 journalctl -u nlmpodcastbot -f 查看)
+StandardOutput=append:/Users/mac/project/nlmpodcastbot/logs/bot.log
+StandardError=append:/Users/mac/project/nlmpodcastbot/logs/bot.log
+
+[Install]
+WantedBy=multi-user.target

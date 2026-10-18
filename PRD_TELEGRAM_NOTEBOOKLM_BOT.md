@@ -31,6 +31,10 @@
        ├─► 素材暂存与格式预处理 (图片经 Gemini Vision 提取为结构化 Markdown .md)
        └─► 触发指令 `/make [可选标题]`
               │
+              ├─► 标题决议策略：
+              │     ├─ 用户显式指定 ──► 直接使用自定义标题
+              │     └─ 用户留空 ─────► 临时占位标题 ──► 后续捕获 NotebookLM 自动生成标题
+              │
               ▼ (组装非交互式结构化 Prompt)
        [Antigravity CLI 子进程] (Headless 模式: agy -p / antigravity -p)
               │
@@ -42,14 +46,18 @@
               ├─► studio_create #1 (触发生成中文双人 Deep Dive 播客音频)
               ├─► studio_create #2 (触发生成纵向标准知识信息图 Infographic)
               ├─► studio_status (轮询检查两项生成物直至均变为 completed/ready)
-              └─► download_artifact (分别下载音频 .m4a 与信息图 .png 至 workspace/outputs)
+              └─► download_artifact (分别下载音频 .m4a 与信息图 .png)
               │
-              ▼ (双生成物落盘交付)
+              ▼ (产物多重候选目录扫描与落盘归集)
+       [多候选目录智能扫描与归集] (outputs/、workspace/、~/Downloads/gemini-notebook)
+              │
+              ▼ (双生成物落盘交付与标题捕获)
 [Telegram Bot 服务]
        │
-       ├─► Step 1: send_photo / send_document (推送知识信息图)
-       ├─► Step 2: send_audio (推送 40MB+ 双人深度播客音频)
-       └─► Step 3: 清除本次任务暂存区，并物理清理 workspace/downloads 临时文件与提取源
+       ├─► Step 1: 解析 stdout JSON 捕获 NotebookLM 自动生成标题并回填通知
+       ├─► Step 2: send_photo / send_document (推送知识信息图)
+       ├─► Step 3: send_audio (推送 40MB+ 双人深度播客音频，携带最终标题)
+       └─► Step 4: 清除本次任务暂存区，并物理清理 workspace/downloads 临时文件（_extracted.md 及原始图片）
               │
               ▼
 [用户 Telegram 客户端] (成功接收图文与音频成果)
@@ -115,6 +123,29 @@
      - **信息图生成**：`studio_create(artifact_type="infographic", confirm=True, orientation="portrait", detail_level="standard", language="zh", focus_prompt="...")`，指定纵向、标准详细度（降低字数变形）、中文。
   4. 轮询等待：每隔 15~20 秒调用 `studio_status` 检查，直至两项均为 `completed`。
   5. 下载输出：分别调用 `download_artifact` 将音频与信息图保存至 `./workspace/outputs/`。
+- **多重候选目录扫描策略（Candidate Directory Scanning）**：
+  - 鉴于底层 MCP 工具在不同平台环境下可能输出到系统默认下载路径，系统设计了多重候选扫描矩阵：
+    - 主输出目录：`./workspace/outputs/`
+    - 工作区目录：`./workspace/`
+    - 回退目录：`~/Downloads/gemini-notebook/`
+  - 任务结束后，系统跨上述目录扫描时间戳在任务启动后的最新音频（`.m4a`/`.mp3`/`.wav`）与信息图（`.png`/`.jpg`/`.pdf`），若不在目标 `outputs/` 则自动原子移动并规范归集。
+
+#### 4.3.1 智能标题生成与输出捕获子流程
+
+为改善用户体验，系统支持两套标题自动化机制：
+
+1. **素材前置标题提炼（`generate_title_from_sources`）**：
+   - **调用时机**：当用户直接发送 `/make` 未携带自定义标题，或需要提前提炼摘要标题时调用。
+   - **执行逻辑**：
+     - 汇总所有暂存素材的 URL 与文件路径，构造精炼 Prompt，要求模型生成 8-15 个汉字的专业中文标题，且仅输出标题正文。
+     - 异步拉起 Antigravity 子进程（使用 `ANTIGRAVITY_MODEL`），注入 60 秒硬超时保护。
+     - 获取模型输出后，自动截取首行并过滤前缀与包裹字符（如 `标题：`、`Title:`、`《》`、`【】`），校验 5-50 字符长度边界。
+2. **NotebookLM 运行态标题提取与回退三级策略**：
+   - **实时输出提取**：在 `run_antigravity_podcast_pipeline` 监听子进程标准输出时，解析包含 JSON 格式的输出行，从中提取 NotebookLM 创建或更新后返回的真实笔记本标题 `{"title": "..."}`。
+   - **三级优先级回退矩阵**：
+     - **第一优先级（用户输入）**：若用户在 Telegram 发送了 `/make 自定义标题`，始终以用户指定标题为准。
+     - **第二优先级（NotebookLM 自动生成）**：若用户未传标题，且子进程捕获到了 NotebookLM 返回的合法 `title`，则更新标题并在 Telegram 提示 `✨ NotebookLM 自动生成标题：《...》`。
+     - **第三优先级（时间戳兜底）**：若前序均未获取到，使用初始化时生成的时间戳兜底标题（`播客速递_YYYYMMDD_HHMM`）。
 
 ### 4.4 状态轮询、双通道交付与网络加固（Delivery）
 
@@ -144,6 +175,8 @@
 | **长任务云端生成耗时** | 运行耗时超过常规 10 分钟 | 全局超时配置为 1800s（30 分钟），无阻塞等待，避免误杀正常任务。 |
 | **超大音频推送超时** | `TimedOut` / `NetworkError` | `HTTPXRequest` 超时加固为 300s；若依然上传失败，素材完整保留，提示用户原地重试。 |
 | **单文件超限（> 50MB）** | 检查音频体积 `file_size_bytes > 50MB` | 拦截 Telegram 官方上传限制，保留本地完整文件并向用户提示本地提取路径。 |
+| **标题提炼超时或格式异常** | `asyncio.TimeoutError` / 长度异常 | 自动降级回退至时间戳默认标题（`播客速递_...`），主流程不受任何阻断。 |
+| **生成物存放路径偏差** | `output_dir` 未发现文件 | 启动多候选目录扫描（`workspace/`、`~/Downloads/gemini-notebook`），智能搜寻并迁移归集。 |
 
 ---
 
@@ -155,6 +188,73 @@
    - 执行 `/make 测试综述`，子进程拉起并平稳运行。
    - Telegram 收到纵向标准信息图（PNG 高清图片）。
    - Telegram 收到普通话对谈的 Deep Dive 播客音频（M4A）。
-4. **清理与重试验证**：
-   - 成功推送后，暂存素材自动清空，`workspace/downloads` 对应临时文件及提取源被物理清理。
+4. **标题智能生成验证**：
+   - 暂存素材后发送无参数指令 `/make`；
+   - 验证系统正常触发标题捕获或提炼逻辑；
+   - 验证 Telegram 进度消息展示 `✨ NotebookLM 自动生成标题：《...》`；
+   - 验证推送的信息图文案与音频卡片名称使用自动提炼的标题。
+5. **清理与重试验证**：
+   - 成功推送后，暂存素材自动清空，`workspace/downloads` 对应临时文件（包括 `_extracted.md` 及原始下载图片）被物理清理。
    - 模拟网络中断测试失败，暂存素材完整保留，直接发送 `/make` 可成功恢复执行。
+6. **运维脚本与自动化部署验证**：
+   - 运行 `./health-check.sh`，输出 5 项体检结果且返回码为 0。
+   - 运行 `./cleanup.sh --dry-run` 正确输出过期文件清单且不执行删除；运行 `./cleanup.sh --force` 完成安全清理。
+   - 运行 `./deploy.sh`，成功拉取最新提交、更新依赖、重启服务并通过健康检查；若引入语法错误导致启动失败，脚本自动回滚代码并恢复前一稳定版本。
+
+---
+
+## 7. 运维体系与部署架构（Operations & Deployment Architecture）
+
+为确保生产环境的高可用、易维护与免人工干预，系统建立了一套包含自动化脚本、系统守护进程与全链路监控的运维工程体系。
+
+### 7.1 运维脚本工具链架构
+
+整个运维工具链以 `common.sh` 为公共核心基座，规范了环境依赖自检、路径解析、PID 锁管理和统一的 ANSI 彩色格式化输出：
+
+```text
+common.sh (公共环境、PID锁、日志函数、配置解析)
+  ├── start.sh        (环境自检 -> PID查重 -> nohup后台启动 -> 存活验证)
+  ├── stop.sh         (PID检测 -> SIGTERM优雅停止 -> 10s超时SIGKILL)
+  ├── restart.sh      (原子调用 stop.sh + start.sh)
+  ├── status.sh       (进程状态 -> 资源占用 -> 缓存统计 -> 配置自检)
+  ├── logs.sh         (tail -f跟随 -> 行数截取 -> 错误过滤 -> 日志清理)
+  ├── health-check.sh (5项体检: 进程/CLI/TG连通性/错误日志/磁盘 -> 状态码0/1/2)
+  ├── cleanup.sh      (扫描缓存 -> 确认/免交互 -> 过期清理 -> 保留.gitkeep)
+  └── deploy.sh       (Git检查 -> git pull -> pip install -> 重启 -> 体检 -> 自动回滚)
+```
+
+- **PID 锁安全机制**：通过 `.bot.pid` 实现单例进程保护，启动时检查 `kill -0 $PID` 防止重复拉起；退出时自动注销 PID 锁。
+- **平滑停止策略**：`stop.sh` 优先发送 `SIGTERM` 信号，循环等待进程安全释放资源并完成清理；若超过 10 秒未退出，升级发送 `SIGKILL` 强制回收。
+
+### 7.2 自动化部署与热更新流程（`deploy.sh`）
+
+`deploy.sh` 实现了生产环境的零停机或近零停机持续集成与热更新：
+
+1. **版本快照**：记录更新前的 Commit ID（`PREV_COMMIT`）与分支；
+2. **工作区安全校验**：检查未提交代码，提示用户通过 `git stash` 保护本地变更；
+3. **代码同步**：执行 `git pull origin <branch>` 获取最新提交；
+4. **依赖自动化同步**：执行 `pip install -r requirements.txt`，确保新增依赖就绪；
+5. **服务平滑重启**：调用 `./restart.sh` 重新拉起应用；
+6. **健康巡检闭环**：调用 `./health-check.sh` 检验新进程存活与 Telegram API 连通性；
+7. **自动化回滚保护（Rollback）**：若在重启或健康检查中检测到严重异常（返回码 2），脚本自动触发 `git reset --hard $PREV_COMMIT`，重新拉起稳定版本，确保生产服务永不宕机。
+
+### 7.3 Systemd 生产守护与崩溃自愈
+
+在 Linux 云服务器生产环境中，推荐通过 systemd 接管守护进程。系统提供了标准服务配置文件 `nlmpodcastbot.service`：
+
+- **自愈重启策略**：配置 `Restart=always` 与 `RestartSec=5s`，当进程因宿主 OOM 或意外异常退出时，操作系统将在 5 秒内自动拉起。
+- **资源限制与安全隔离**：配置 `LimitNOFILE=65535` 确保大文件传输不耗尽文件句柄；配置 `KillSignal=SIGTERM` 与 `TimeoutStopSec=15s` 实现平稳停机。
+- **日志持久化重定向**：标准输出与错误输出直接重定向至 `./logs/bot.log`，同时被 systemd journal 捕获，支持通过 `journalctl -u nlmpodcastbot -f` 统一排查。
+
+### 7.4 缓存管理与生命周期策略（`cleanup.sh`）
+
+系统制定了分级过期回收策略，由 `cleanup.sh` 统一调度：
+
+| 目录/对象 | 过期阈值 | 清理目标与规则 |
+| :--- | :--- | :--- |
+| `workspace/downloads/` | **> 24 小时** | 清理用户上传的临时文档、音频、原始图片及提取出的 Markdown，严格保留 `.gitkeep` |
+| `workspace/outputs/` | **> 72 小时 (3天)** | 清理历史已交付的音频文件（.m4a/.mp3）与信息图（.png/.jpg/.pdf），严格保留 `.gitkeep` |
+| `logs/` | **> 7 天** | 清理轮转归档的历史日志文件，保障磁盘空间充裕 |
+
+- **安全预览（Dry Run）**：通过 `./cleanup.sh --dry-run` 仅输出匹配文件清单与预计释放空间，杜绝误删风险。
+- **定时自动化执行**：通过 `./cleanup.sh --force` 免交互运行，可直接编排至 Crontab 任务（例如：`0 3 * * * /path/to/cleanup.sh --force`）。

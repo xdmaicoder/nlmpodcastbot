@@ -5,6 +5,7 @@ status polling, and audio/infographic output detection.
 """
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -22,6 +23,123 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_title_generation_prompt(sources: list[str]) -> str:
+    """Build a concise prompt for generating a title from sources.
+    
+    Args:
+        sources: List of source URLs or file paths
+        
+    Returns:
+        A prompt string for title generation
+    """
+    sources_summary = "\n".join(f"{i}. {s}" for i, s in enumerate(sources, 1))
+    
+    prompt = f"""你是一个内容标题生成专家。请根据以下素材列表，生成一个简洁、准确的中文标题（8-15个汉字）。
+
+素材列表：
+{sources_summary}
+
+要求：
+1. 只输出标题文本，不要任何其他内容
+2. 长度：8-15个汉字
+3. 准确提炼核心主题
+4. 使用专业但易懂的表达
+
+直接输出标题："""
+    return prompt
+
+
+async def generate_title_from_sources(
+    sources: list[str],
+    timeout: int = 60,
+) -> Optional[str]:
+    """Generate a title by analyzing the provided sources using Antigravity CLI.
+    
+    Args:
+        sources: List of source URLs or file paths to analyze
+        timeout: Maximum seconds to wait for title generation (default: 60)
+        
+    Returns:
+        Generated title string, or None if generation fails
+    """
+    try:
+        prompt = _build_title_generation_prompt(sources)
+        cli_bin = shutil.which(ANTIGRAVITY_BIN) or shutil.which("agy") or "/opt/homebrew/bin/agy"
+        
+        if not Path(cli_bin).exists() and not shutil.which(str(cli_bin)):
+            logger.warning("Antigravity CLI not found, cannot generate title")
+            return None
+        
+        cmd = [
+            str(cli_bin),
+            "-p",
+            prompt,
+            "--model",
+            ANTIGRAVITY_MODEL,
+            "--dangerously-skip-permissions",
+        ]
+        
+        logger.info("Starting title generation via Antigravity CLI")
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(WORKSPACE_DIR.resolve()),
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Title generation timed out after %ds", timeout)
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
+            return None
+        
+        if process.returncode != 0:
+            logger.warning(
+                "Title generation failed with exit code %d: %s",
+                process.returncode,
+                stderr.decode("utf-8", errors="replace")[:200],
+            )
+            return None
+        
+        # Extract title from stdout
+        output = stdout.decode("utf-8", errors="replace").strip()
+        if not output:
+            logger.warning("Title generation returned empty output")
+            return None
+        
+        # Take only the first line and clean it
+        title = output.split("\n")[0].strip()
+        
+        # Remove common prefix patterns
+        for prefix in ["标题：", "标题:", "Title:", "Title：", "《", "】", "【"]:
+            if title.startswith(prefix):
+                title = title[len(prefix):].strip()
+        for suffix in ["》", "】", "【"]:
+            if title.endswith(suffix):
+                title = title[:-len(suffix)].strip()
+        
+        # Validate length (should be 8-15 Chinese characters or reasonable length)
+        if len(title) < 5 or len(title) > 50:
+            logger.warning("Generated title has unusual length (%d): %s", len(title), title)
+            return None
+        
+        logger.info("Successfully generated title: %s", title)
+        return title
+        
+    except Exception as e:
+        logger.warning("Title generation encountered error: %s", e)
+        return None
 
 
 def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> str:
@@ -60,8 +178,9 @@ def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> s
 2. 信息图（Infographic）：必须指定语言为中文（language="zh"），版式方向为纵向（orientation="portrait"），详细程度为标准（detail_level="standard"）。专注于核心框架与关键点提炼，文字精简精练，避免大段密集文字以提升文字渲染准确度。
 
 【严格执行步骤】
-1. 步骤 1（创建笔记本）：
-   调用 notebook_create(title="{title}") 创建新笔记本，提取并记录返回的 notebook_id。
+1. 步骤 1（创建笔记本并提取标题）：
+   调用 notebook_create() 创建新笔记本（不指定 title 参数以让 NotebookLM 自动生成标题），提取并记录返回的 notebook_id 和 title。
+   若 title 字段存在且不为空，请将其以 JSON 格式输出到标准输出：{{"title": "自动生成的标题文本"}}。
 
 2. 步骤 2（批量挂载素材）：
    对以下 {len(sources)} 份素材，依次调用 source_add 添加到该 notebook_id：
@@ -323,7 +442,23 @@ async def run_antigravity_podcast_pipeline(
     else:
         logger.warning("No infographic file detected in output candidates.")
 
+    notebooklm_title: Optional[str] = None
+    for line in stdout_lines:
+        stripped = line.strip()
+        if not stripped or stripped[0] not in "{[":
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
+            candidate = parsed["title"].strip()
+            if candidate:
+                notebooklm_title = candidate
+                break
+
     return {
         "audio": audio_path,
         "infographic": infographic_path,
+        "title": notebooklm_title,
     }

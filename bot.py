@@ -325,6 +325,8 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Extract title or fallback to default timestamped title
     custom_title = " ".join(context.args).strip() if context.args else ""
     default_title = f"播客速递_{time.strftime('%Y%m%d_%H%M')}"
+    
+    # Use custom title if provided, otherwise use placeholder for NotebookLM to generate
     podcast_title = custom_title if custom_title else default_title
 
     # Snapshot current materials without clearing staging yet (delayed release strategy)
@@ -362,6 +364,17 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             output_dir=OUTPUTS_DIR,
             progress_callback=progress_callback,
         )
+        
+        # Use NotebookLM generated title if available and user didn't provide custom title
+        notebooklm_title = pipeline_result.get("title")
+        if notebooklm_title and not custom_title:
+            podcast_title = notebooklm_title
+            await status_msg.edit_text(
+                f"✨ **NotebookLM 自动生成标题：《{podcast_title}》**\n\n"
+                f"• 素材数量: {len(staged_items)} 份\n"
+                f"• 状态: 播客与信息图制作完成",
+                parse_mode=ParseMode.MARKDOWN,
+            )
         audio_path = pipeline_result["audio"]
         infographic_path = pipeline_result.get("infographic")
 
