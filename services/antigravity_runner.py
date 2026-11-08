@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -23,6 +24,38 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def is_valid_title(title: Optional[str]) -> bool:
+    """Validate whether a candidate title is informative and not an untitled placeholder.
+    
+    Args:
+        title: The title candidate to inspect.
+        
+    Returns:
+        True if the title is valid and meaningful, False otherwise.
+    """
+    if not title or not isinstance(title, str):
+        return False
+    t = title.strip().lower()
+    invalid_patterns = {
+        "untitled",
+        "untitled notebook",
+        "untitled document",
+        "untitled notes",
+        "无标题",
+        "无标题笔记本",
+        "未命名",
+        "未命名笔记本",
+        "none",
+        "null",
+    }
+    if t in invalid_patterns:
+        return False
+    cleaned = t.strip("`'\"《》【】[]()（） ")
+    if cleaned in invalid_patterns:
+        return False
+    return len(cleaned) > 0
 
 
 def _build_title_generation_prompt(sources: list[str]) -> str:
@@ -142,7 +175,11 @@ async def generate_title_from_sources(
         return None
 
 
-def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> str:
+def build_pipeline_prompt(
+    title: Optional[str],
+    sources: list[str],
+    output_dir: Path,
+) -> str:
     """Build a structured, strict prompt instructing the Antigravity Agent.
 
     Uses exact tool names and parameter schemas from the Gemini Notebook MCP server.
@@ -166,9 +203,30 @@ def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> s
     chinese_podcast_focus = "请两位主持人全程使用中文（普通话）展开深入、风趣且自然的对话讨论。哪怕来源材料是英文，也请翻译并完全用中文进行总结和剖析。"
     chinese_infographic_focus = "专注于核心框架与关键要点提炼，文字精简精练，全中文呈现，排版清晰美观，避免过度密集的大段文本，确保中文文字清晰准确。"
 
+    has_custom_title = bool(title and is_valid_title(title))
+    if has_custom_title:
+        target_task_desc = f'为笔记本 "{title}" 在同一笔记本内同时制作：'
+        step1_instruction = (
+            f'调用 notebook_create(title="{title}") 创建新笔记本，提取并记录返回的 notebook_id。'
+        )
+        step6_instruction = (
+            f'由于用户已明确指定标题，请直接以严格 JSON 格式输出到标准输出单独一行：{{"title": "{title}"}}。'
+        )
+    else:
+        target_task_desc = "在同一笔记本内同时制作（主题标题将由 NotebookLM 挂载素材后自动分析生成）："
+        step1_instruction = (
+            "调用 notebook_create() 创建新笔记本（不传 title 参数，以便挂载素材后由 NotebookLM 自动生成标题），提取并记录返回的 notebook_id。\n"
+            "   【重要注意事项】刚创建的空笔记本返回的默认标题为 \"Untitled notebook\"，此时尚未挂载素材，请绝对不要输出任何标题，严禁将 \"Untitled notebook\" 当作标题输出！"
+        )
+        step6_instruction = (
+            "在所有文件下载完成后，调用 notebook_get(notebook_id=notebook_id) 查询笔记本最新的元数据：\n"
+            "   (a) 检查返回的 notebook 对象中的 title 字段。NotebookLM 在分析处理完素材后，会自动为笔记本命名精准的主题标题（如《2027年最赚钱的AI创业方向》）。若该 title 存在且不是 \"Untitled notebook\"，请以严格 JSON 格式输出到单独一行：{{\"title\": \"提取到的真实标题\"}}。\n"
+            "   (b) 若 notebook.title 依然为 \"Untitled notebook\" 或为空，请查看 notebook_get 返回的 sources 素材列表，使用第一个素材的 title（去除网站后缀如 \"/ X\" 等），以严格 JSON 格式输出到单独一行：{{\"title\": \"素材核心标题\"}}。"
+        )
+
     prompt = f"""你是一个专业的全自动知识内容制作 AI 助手。请直接调用已配置的 gemini-notebook-mcp 工具，严格按以下步骤依次完成中文双人播客与知识信息图（Infographic）的双重制作全流程：
 
-【目标任务】为笔记本 "{title}" 在同一笔记本内同时制作：
+【目标任务】{target_task_desc}
 1. 中文 Audio Overview（双人对话 Deep Dive 播客音频）；
 2. 知识信息图（Infographic，格式要求：中文、纵向 Portrait、标准 Standard）；
 并分别下载两份成品文件。
@@ -178,9 +236,8 @@ def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> s
 2. 信息图（Infographic）：必须指定语言为中文（language="zh"），版式方向为纵向（orientation="portrait"），详细程度为标准（detail_level="standard"）。专注于核心框架与关键点提炼，文字精简精练，避免大段密集文字以提升文字渲染准确度。
 
 【严格执行步骤】
-1. 步骤 1（创建笔记本并提取标题）：
-   调用 notebook_create() 创建新笔记本（不指定 title 参数以让 NotebookLM 自动生成标题），提取并记录返回的 notebook_id 和 title。
-   若 title 字段存在且不为空，请将其以 JSON 格式输出到标准输出：{{"title": "自动生成的标题文本"}}。
+1. 步骤 1（创建笔记本）：
+   {step1_instruction}
 
 2. 步骤 2（批量挂载素材）：
    对以下 {len(sources)} 份素材，依次调用 source_add 添加到该 notebook_id：
@@ -226,6 +283,9 @@ def build_pipeline_prompt(title: str, sources: list[str], output_dir: Path) -> s
        （或 CLI: `nlm download infographic <notebook_id> -o {infographic_filename}`）
    两份文件均保存在输出目录：{output_dir.resolve()}。
 
+6. 步骤 6（确认并提取最终标题）：
+   {step6_instruction}
+
 请全自动连续执行上述所有步骤，不要在中间中断，完成所有步骤后输出生成结果总结。"""
     return prompt
 
@@ -256,11 +316,11 @@ def resolve_cli_command(prompt: str) -> list[str]:
 
 
 async def run_antigravity_podcast_pipeline(
-    title: str,
+    title: Optional[str],
     sources: list[str],
     output_dir: Path,
     progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
-) -> dict[str, Optional[Path]]:
+) -> dict[str, Optional[Path | str]]:
     """Execute the end-to-end podcast & infographic generation pipeline via Antigravity CLI.
 
     Returns:
@@ -443,19 +503,51 @@ async def run_antigravity_podcast_pipeline(
         logger.warning("No infographic file detected in output candidates.")
 
     notebooklm_title: Optional[str] = None
+    # 1. Parse JSON objects from stdout lines, preferring the latest valid title
     for line in stdout_lines:
         stripped = line.strip()
-        if not stripped or stripped[0] not in "{[":
+        if not stripped:
             continue
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
-            candidate = parsed["title"].strip()
-            if candidate:
-                notebooklm_title = candidate
+        json_candidates = []
+        if stripped[0] in "{[":
+            json_candidates.append(stripped)
+        else:
+            match = re.search(r'\{[^{}]*"title"[^{}]*\}', stripped)
+            if match:
+                json_candidates.append(match.group(0))
+
+        for cand_json in json_candidates:
+            try:
+                parsed = json.loads(cand_json)
+                if isinstance(parsed, dict) and isinstance(parsed.get("title"), str):
+                    cand_title = parsed["title"].strip()
+                    if is_valid_title(cand_title):
+                        notebooklm_title = cand_title
+            except json.JSONDecodeError:
+                continue
+
+    # 2. Fallback: regex search on markdown report in stdout if JSON was not caught
+    if not notebooklm_title:
+        title_patterns = [
+            r"-\s*\*\*自动生成标题\*\*:\s*`?([^\`\n\r]+)`?",
+            r"-\s*\*\*笔记本标题\*\*:\s*`?([^\`\n\r]+)`?",
+            r"-\s*\*\*Title\*\*:\s*`?([^\`\n\r]+)`?",
+        ]
+        for line in reversed(stdout_lines):
+            for pat in title_patterns:
+                m = re.search(pat, line)
+                if m:
+                    cand = m.group(1).strip()
+                    if is_valid_title(cand):
+                        notebooklm_title = cand
+                        break
+            if notebooklm_title:
                 break
+
+    if notebooklm_title:
+        logger.info("Successfully identified notebook title: %s", notebooklm_title)
+    else:
+        logger.info("No valid notebook title extracted from process output.")
 
     return {
         "audio": audio_path,

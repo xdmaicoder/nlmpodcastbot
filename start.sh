@@ -64,7 +64,7 @@ NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 
 # 6. 等待并验证进程存活状态（防止因语法错误或 Token 无效瞬间闪退）
-sleep 2
+sleep 3
 
 if kill -0 "$NEW_PID" 2>/dev/null; then
     echo -e "${COLOR_GREEN}======================================================${COLOR_NC}"

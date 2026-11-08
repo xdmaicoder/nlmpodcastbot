@@ -29,10 +29,12 @@ from config import (
     ALLOWED_USER_ID,
     BOT_TOKEN,
     DOWNLOADS_DIR,
+    HTTP_PROXY,
+    HTTPS_PROXY,
     OUTPUTS_DIR,
     validate_config,
 )
-from services.antigravity_runner import run_antigravity_podcast_pipeline
+from services.antigravity_runner import is_valid_title, run_antigravity_podcast_pipeline
 from services.converter import convert_image_to_markdown, save_text_note
 
 # Logging setup
@@ -40,6 +42,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("telegram_bot")
 
 # In-memory staging store: user_id -> list of {"type": str, "value": str, "name": str}
@@ -326,15 +329,19 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     custom_title = " ".join(context.args).strip() if context.args else ""
     default_title = f"播客速递_{time.strftime('%Y%m%d_%H%M')}"
     
-    # Use custom title if provided, otherwise use placeholder for NotebookLM to generate
-    podcast_title = custom_title if custom_title else default_title
-
     # Snapshot current materials without clearing staging yet (delayed release strategy)
     staged_items = list(items)
     user_active_jobs[user_id] = True
 
+    if custom_title:
+        init_title_text = f"：《{custom_title}》"
+        progress_header = f"🎙️ **《{custom_title}》制作中**"
+    else:
+        init_title_text = "（主题将由 NotebookLM 自动提炼）"
+        progress_header = "🎙️ **播客与信息图制作中**"
+
     status_msg = await update.message.reply_text(
-        f"🚀 **开始制作播客与信息图：《{podcast_title}》**\n\n"
+        f"🚀 **开始制作播客与信息图 {init_title_text}**\n\n"
         f"• 素材总计: {len(staged_items)} 份\n"
         "• 状态: 正在唤起 Antigravity CLI 调度任务...",
         parse_mode=ParseMode.MARKDOWN,
@@ -348,7 +355,7 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             last_text = status_text
             try:
                 await status_msg.edit_text(
-                    f"🎙️ **《{podcast_title}》制作中**\n\n"
+                    f"{progress_header}\n\n"
                     f"• 素材数量: {len(staged_items)} 份\n"
                     f"• 当前进度: {status_text}",
                     parse_mode=ParseMode.MARKDOWN,
@@ -359,15 +366,17 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         source_paths_or_urls = [it["value"] for it in staged_items]
         pipeline_result = await run_antigravity_podcast_pipeline(
-            title=podcast_title,
+            title=custom_title if custom_title else None,
             sources=source_paths_or_urls,
             output_dir=OUTPUTS_DIR,
             progress_callback=progress_callback,
         )
         
-        # Use NotebookLM generated title if available and user didn't provide custom title
+        # Determine final podcast title
         notebooklm_title = pipeline_result.get("title")
-        if notebooklm_title and not custom_title:
+        if custom_title:
+            podcast_title = custom_title
+        elif is_valid_title(notebooklm_title):
             podcast_title = notebooklm_title
             await status_msg.edit_text(
                 f"✨ **NotebookLM 自动生成标题：《{podcast_title}》**\n\n"
@@ -375,6 +384,8 @@ async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"• 状态: 播客与信息图制作完成",
                 parse_mode=ParseMode.MARKDOWN,
             )
+        else:
+            podcast_title = default_title
         audio_path = pipeline_result["audio"]
         infographic_path = pipeline_result.get("infographic")
 
@@ -512,11 +523,13 @@ def main() -> None:
     logger.info("Initializing Telegram Bot with whitelist user_id=%d", ALLOWED_USER_ID)
 
     # Custom HTTPXRequest with increased timeouts for large media uploads and proxy connections
+    proxy_url = HTTPS_PROXY or HTTP_PROXY or None
     request = HTTPXRequest(
         connect_timeout=60.0,
         read_timeout=300.0,
         write_timeout=300.0,
         pool_timeout=60.0,
+        proxy=proxy_url,
     )
 
     app = ApplicationBuilder().token(BOT_TOKEN).request(request).build()
@@ -541,7 +554,10 @@ def main() -> None:
     app.add_handler(MessageHandler(~user_filter, silent_drop))
 
     logger.info("Bot starting polling...")
-    app.run_polling()
+    app.run_polling(
+        bootstrap_retries=5,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":

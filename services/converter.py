@@ -198,6 +198,7 @@ def save_text_note(text: str, output_dir: Path, prefix: str = "note") -> Path:
     Returns:
         Path to the saved text file.
     """
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{prefix}_{int(time.time() * 1000)}.txt"
     file_path = output_dir / filename
